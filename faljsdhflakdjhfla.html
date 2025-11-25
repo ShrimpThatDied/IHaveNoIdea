@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Platformer & Editor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1e293b; /* Slate 800 */
+            color: #f1f5f9; /* Slate 100 */
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .game-container {
+            background-color: #334155; /* Slate 700 */
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+            padding: 20px;
+            width: 100%;
+            max-width: 900px;
+        }
+        canvas {
+            display: block;
+            background-color: #94a3b8; /* Slate 400 - Sky background */
+            border-radius: 8px;
+            cursor: pointer;
+            width: 100%;
+            /* Maintain aspect ratio: Canvas is 16 tiles wide, 9 high. 
+               The JS will set dimensions, but this helps the container. */
+        }
+        .btn-group button {
+            transition: all 0.2s;
+            box-shadow: 0 4px #1e293b;
+        }
+        .btn-group button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px #1e293b;
+        }
+        .btn-group button:active {
+            transform: translateY(2px);
+            box-shadow: 0 2px #1e293b;
+        }
+        .selected-tool {
+            border: 3px solid #f97316; /* Orange 600 */
+            background-color: #f97316 !important;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="game-container">
+        <h1 class="text-3xl font-bold mb-4 text-center">Platformer Sandbox</h1>
+
+        <canvas id="gameCanvas" width="800" height="450"></canvas>
+
+        <div class="mt-4 flex flex-wrap justify-between items-center gap-4">
+            <!-- Game Status / Editor Info -->
+            <div id="status" class="text-lg font-semibold bg-blue-900/50 p-2 rounded-lg">
+                Status: Loading...
+            </div>
+
+            <!-- Main Mode Toggle -->
+            <button id="toggleMode" class="px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg whitespace-nowrap">
+                Switch to Editor Mode
+            </button>
+        </div>
+
+        <!-- Editor Controls (Initially Hidden) -->
+        <div id="editorControls" class="mt-6 bg-slate-600 p-4 rounded-xl hidden">
+            <h2 class="text-xl font-bold mb-3">Level Editor Tools</h2>
+            <p class="text-sm mb-4">Click on the canvas to place or remove tiles. Remember to save!</p>
+            
+            <div class="flex flex-wrap gap-3 btn-group">
+                <button data-tool="1" class="tool-btn px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg selected-tool">
+                    Platform (1)
+                </button>
+                <button data-tool="2" class="tool-btn px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg">
+                    Start (2)
+                </button>
+                <button data-tool="3" class="tool-btn px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-black rounded-lg">
+                    Goal (3)
+                </button>
+                <button data-tool="0" class="tool-btn px-4 py-2 bg-gray-400 hover:bg-gray-500 text-black rounded-lg">
+                    Erase (0)
+                </button>
+            </div>
+            
+            <div class="mt-4 flex gap-3">
+                <button id="saveLevel" class="px-4 py-2 bg-fuchsia-600 hover:bg-fuchsia-700 text-white font-semibold rounded-lg">
+                    Save Level
+                </button>
+                <button id="resetLevel" class="px-4 py-2 bg-red-700 hover:bg-red-800 text-white font-semibold rounded-lg">
+                    Reset Map
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Firebase Imports and Setup -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // setLogLevel('Debug'); // Uncomment for debugging Firestore
+
+        // --- GLOBAL SETUP ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-platformer-app';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, db, auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        // --- GAME CONSTANTS ---
+        const TILE_SIZE = 50; // Size of a single block in pixels
+        const COLS = 16;
+        const ROWS = 9;
+        const GRAVITY = 0.8;
+        const JUMP_POWER = -15;
+        const MOVE_SPEED = 5;
+
+        // --- GAME STATE ---
+        let levelMap = [ // Default starting level
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1],
+            [2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        ];
+
+        let player = {
+            x: TILE_SIZE * 1.5,
+            y: TILE_SIZE * 7,
+            width: TILE_SIZE * 0.6,
+            height: TILE_SIZE * 0.8,
+            vx: 0,
+            vy: 0,
+            isGrounded: false
+        };
+
+        let keys = {};
+        let editMode = false;
+        let selectedTool = 1; // 1: Platform, 2: Start, 3: Goal, 0: Erase
+        let gameActive = true;
+
+        // --- CANVAS SETUP ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = COLS * TILE_SIZE;
+        canvas.height = ROWS * TILE_SIZE;
+
+        const statusDisplay = document.getElementById('status');
+        const editorControls = document.getElementById('editorControls');
+        const toggleModeBtn = document.getElementById('toggleMode');
+
+        // --- FIREBASE AND AUTH FUNCTIONS ---
+
+        function getLevelDocRef(id) {
+            if (!db || !userId) return null;
+            // Private user data path: /artifacts/{appId}/users/{userId}/levels
+            return doc(db, 'artifacts', appId, 'users', id, 'levels', 'editor_level');
+        }
+
+        async function saveLevel(mapData) {
+            if (!isAuthReady || !userId) {
+                console.error("Authentication not ready or userId missing.");
+                return;
+            }
+            try {
+                const docRef = getLevelDocRef(userId);
+                if (docRef) {
+                    // Firestore cannot directly save 2D arrays of numbers, 
+                    // so we stringify it to save it as a single string field.
+                    await setDoc(docRef, { map: JSON.stringify(mapData) });
+                    updateStatus("Level saved successfully!", "text-green-400");
+                }
+            } catch (error) {
+                console.error("Error saving level:", error);
+                updateStatus("Error saving level. Check console.", "text-red-400");
+            }
+        }
+
+        async function loadLevel() {
+            if (!isAuthReady || !userId) return;
+            try {
+                const docRef = getLevelDocRef(userId);
+                if (docRef) {
+                    const docSnap = await getDoc(docRef);
+                    if (docSnap.exists()) {
+                        const data = docSnap.data();
+                        if (data.map) {
+                            // Parse the stringified map data back into a 2D array
+                            const loadedMap = JSON.parse(data.map);
+                            if (Array.isArray(loadedMap) && loadedMap.length === ROWS && loadedMap[0].length === COLS) {
+                                levelMap = loadedMap;
+                                resetPlayerToStart();
+                                updateStatus("Level loaded from cloud.", "text-yellow-400");
+                                return;
+                            }
+                        }
+                    }
+                    updateStatus("No saved level found, using default map.", "text-gray-400");
+                }
+            } catch (error) {
+                console.error("Error loading level:", error);
+                updateStatus("Error loading level. Using default map.", "text-red-400");
+            }
+        }
+
+        function initFirebase() {
+            if (Object.keys(firebaseConfig).length === 0) {
+                 updateStatus("Firebase Config Missing. Persistence Disabled.", "text-red-400");
+                 isAuthReady = true;
+                 return;
+            }
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        updateStatus(`Authenticated: ${userId.substring(0, 8)}...`, "text-blue-400");
+                        await loadLevel();
+                        startGameLoop();
+                    } else {
+                        // Attempt sign-in if not yet done
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    }
+                });
+            } catch (e) {
+                console.error("Firebase Initialization Failed:", e);
+                updateStatus("Firebase Init Error. Persistence Disabled.", "text-red-400");
+                isAuthReady = true;
+                startGameLoop(); // Start without persistence
+            }
+        }
+
+        // --- GAME UTILITY FUNCTIONS ---
+
+        function updateStatus(message, colorClass = "text-white") {
+            statusDisplay.textContent = message;
+            statusDisplay.className = `text-lg font-semibold bg-blue-900/50 p-2 rounded-lg ${colorClass}`;
+        }
+
+        function getTile(x, y) {
+            const col = Math.floor(x / TILE_SIZE);
+            const row = Math.floor(y / TILE_SIZE);
+            if (row >= 0 && row < ROWS && col >= 0 && col < COLS) {
+                return levelMap[row][col];
+            }
+            return 1; // Treat out of bounds as a wall
+        }
+
+        function resetPlayerToStart() {
+            let startFound = false;
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    if (levelMap[r][c] === 2) {
+                        player.x = c * TILE_SIZE + (TILE_SIZE - player.width) / 2;
+                        player.y = r * TILE_SIZE; // Start position
+                        player.vx = 0;
+                        player.vy = 0;
+                        player.isGrounded = false;
+                        startFound = true;
+                        break;
+                    }
+                }
+                if (startFound) break;
+            }
+            // Fallback if no start tile (2) is present
+            if (!startFound) {
+                player.x = TILE_SIZE * 1.5;
+                player.y = TILE_SIZE * 7;
+                player.vx = 0;
+                player.vy = 0;
+            }
+        }
+
+        function handleCollision(dx, dy) {
+            const checkCollision = (nx, ny, w, h) => {
+                const cols = [Math.floor(nx / TILE_SIZE), Math.floor((nx + w) / TILE_SIZE)];
+                const rows = [Math.floor(ny / TILE_SIZE), Math.floor((ny + h) / TILE_SIZE)];
+                
+                for (let r = rows[0]; r <= rows[1]; r++) {
+                    for (let c = cols[0]; c <= cols[1]; c++) {
+                        if (getTile(c * TILE_SIZE, r * TILE_SIZE) === 1) {
+                            return { tileX: c * TILE_SIZE, tileY: r * TILE_SIZE };
+                        }
+                    }
+                }
+                return null;
+            };
+
+            // Horizontal Collision
+            const nextX = player.x + dx;
+            let hit = checkCollision(nextX, player.y, player.width, player.height);
+            if (hit) {
+                dx = 0;
+                player.vx = 0;
+                if (nextX < hit.tileX) {
+                    player.x = hit.tileX - player.width - 0.01;
+                } else {
+                    player.x = hit.tileX + TILE_SIZE + 0.01;
+                }
+            } else {
+                player.x = nextX;
+            }
+
+            // Vertical Collision
+            const nextY = player.y + dy;
+            hit = checkCollision(player.x, nextY, player.width, player.height);
+            if (hit) {
+                dy = 0;
+                player.vy = 0;
+                if (nextY < hit.tileY) {
+                    player.y = hit.tileY - player.height - 0.01; // Snap to ground
+                    player.isGrounded = true;
+                } else {
+                    player.y = hit.tileY + TILE_SIZE + 0.01; // Snap below ceiling
+                }
+            } else {
+                player.y = nextY;
+                player.isGrounded = false;
+            }
+
+            // Check Goal
+            const playerCenterTile = getTile(player.x + player.width / 2, player.y + player.height / 2);
+            if (playerCenterTile === 3) {
+                gameActive = false;
+                updateStatus("You Reached the Goal! Press ESC to restart.", "text-lime-400");
+                // Freeze player
+                player.vx = 0;
+                player.vy = 0;
+            }
+        }
+
+        // --- GAME LOOP ---
+
+        function update() {
+            if (!gameActive || editMode) return;
+
+            // Apply gravity
+            player.vy += GRAVITY;
+
+            // Player input
+            player.vx = 0;
+            if (keys['ArrowLeft'] || keys['KeyA']) {
+                player.vx = -MOVE_SPEED;
+            }
+            if (keys['ArrowRight'] || keys['KeyD']) {
+                player.vx = MOVE_SPEED;
+            }
+            if (keys['Space'] || keys['ArrowUp'] || keys['KeyW']) {
+                if (player.isGrounded) {
+                    player.vy = JUMP_POWER;
+                    player.isGrounded = false; // Prevents spamming jump
+                    keys['Space'] = false; // Only one jump per key press
+                    keys['ArrowUp'] = false;
+                    keys['KeyW'] = false;
+                }
+            }
+
+            // Move and collide
+            handleCollision(player.vx, player.vy);
+
+            // Out of bounds check (fell off map)
+            if (player.y > canvas.height) {
+                updateStatus("You fell! Press ESC to restart.", "text-red-400");
+                gameActive = false;
+            }
+        }
+
+        function draw() {
+            // Clear canvas (Sky)
+            ctx.fillStyle = editMode ? '#64748b' : '#94a3b8'; // Darker grey in editor mode
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw Level
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    const tileType = levelMap[r][c];
+                    const x = c * TILE_SIZE;
+                    const y = r * TILE_SIZE;
+
+                    switch (tileType) {
+                        case 1: // Platform
+                            ctx.fillStyle = '#10b981'; // Emerald 500
+                            ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
+                            ctx.strokeStyle = '#059669'; // Emerald 600
+                            ctx.strokeRect(x, y, TILE_SIZE, TILE_SIZE);
+                            break;
+                        case 2: // Start
+                            ctx.fillStyle = '#ef4444'; // Red 500
+                            ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
+                            // Draw an 'S'
+                            ctx.fillStyle = 'white';
+                            ctx.font = `${TILE_SIZE * 0.5}px Inter`;
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText('S', x + TILE_SIZE / 2, y + TILE_SIZE / 2);
+                            break;
+                        case 3: // Goal
+                            ctx.fillStyle = '#facc15'; // Yellow 400
+                            ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
+                            // Draw a 'G'
+                            ctx.fillStyle = 'black';
+                            ctx.font = `${TILE_SIZE * 0.5}px Inter`;
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText('G', x + TILE_SIZE / 2, y + TILE_SIZE / 2);
+                            break;
+                    }
+
+                    if (editMode) {
+                         // Draw grid lines
+                        ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+                        ctx.strokeRect(x, y, TILE_SIZE, TILE_SIZE);
+                    }
+                }
+            }
+
+            // Draw Player
+            ctx.fillStyle = '#0f766e'; // Teal 700
+            ctx.fillRect(player.x, player.y, player.width, player.height);
+            ctx.strokeStyle = '#0e7490';
+            ctx.strokeRect(player.x, player.y, player.width, player.height);
+            
+            if (editMode) {
+                 // Player is just a marker in editor mode
+                 ctx.fillStyle = 'rgba(15, 118, 110, 0.5)';
+                 ctx.fillRect(player.x, player.y, player.width, player.height);
+            }
+        }
+
+        function gameLoop() {
+            update();
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        function startGameLoop() {
+            updateStatus(editMode ? "Editor Mode. Click to place tiles." : "Game Mode. Use WASD/Arrows to move.", "text-white");
+            window.requestAnimationFrame(gameLoop);
+        }
+        
+        // --- INPUT HANDLERS ---
+
+        function handleLevelEditorClick(event) {
+            if (!editMode) return;
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+
+            const x = (event.clientX - rect.left) * scaleX;
+            const y = (event.clientY - rect.top) * scaleY;
+
+            const col = Math.floor(x / TILE_SIZE);
+            const row = Math.floor(y / TILE_SIZE);
+
+            if (row >= 0 && row < ROWS && col >= 0 && col < COLS) {
+                // If the selected tool is Start (2) or Goal (3), we must find and erase the old one first.
+                if (selectedTool === 2 || selectedTool === 3) {
+                    for (let r = 0; r < ROWS; r++) {
+                        for (let c = 0; c < COLS; c++) {
+                            // Find the existing tile of the same type and erase it (set to 0)
+                            if (levelMap[r][c] === selectedTool) {
+                                levelMap[r][c] = 0;
+                            }
+                        }
+                    }
+                }
+                
+                // Set the tile at the clicked location.
+                // If selectedTool is 0 (Erase), this sets it to 0 (empty).
+                levelMap[row][col] = selectedTool;
+                
+                if (selectedTool === 2) {
+                    resetPlayerToStart(); // Update player position immediately after placing a start tile
+                }
+                
+                draw(); // Redraw immediately
+            }
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (editMode) return;
+            keys[e.code] = true;
+            
+            // Allow ESCAPE to reset game state
+            if (e.code === 'Escape' && !gameActive) {
+                resetPlayerToStart();
+                gameActive = true;
+                updateStatus("Game Mode. Use WASD/Arrows to move.", "text-white");
+            }
+            
+            // Prevent default for spacebar to stop page scroll
+            if (e.code === 'Space') e.preventDefault();
+        });
+
+        document.addEventListener('keyup', (e) => {
+            if (editMode) return;
+            keys[e.code] = false;
+        });
+
+        canvas.addEventListener('mousedown', handleLevelEditorClick);
+
+        toggleModeBtn.addEventListener('click', () => {
+            editMode = !editMode;
+            if (editMode) {
+                editorControls.classList.remove('hidden');
+                toggleModeBtn.textContent = 'Switch to Game Mode';
+                updateStatus("Editor Mode. Click to place tiles.", "text-white");
+            } else {
+                editorControls.classList.add('hidden');
+                toggleModeBtn.textContent = 'Switch to Editor Mode';
+                resetPlayerToStart(); // Snap player back to start position
+                gameActive = true;
+                updateStatus("Game Mode. Use WASD/Arrows to move.", "text-white");
+            }
+        });
+
+        document.querySelectorAll('.tool-btn').forEach(button => {
+            button.addEventListener('click', (e) => {
+                // Deselect all
+                document.querySelectorAll('.tool-btn').forEach(btn => btn.classList.remove('selected-tool'));
+                
+                // Select clicked button
+                e.currentTarget.classList.add('selected-tool');
+                
+                selectedTool = parseInt(e.currentTarget.dataset.tool, 10);
+            });
+        });
+
+        document.getElementById('saveLevel').addEventListener('click', () => {
+            saveLevel(levelMap);
+        });
+
+        document.getElementById('resetLevel').addEventListener('click', () => {
+            // Note: window.confirm is replaced by direct execution in this environment
+            console.log('Map reset initiated.');
+            levelMap = [
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1],
+                [2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            ];
+            saveLevel(levelMap); // Also save the reset map
+            resetPlayerToStart();
+            updateStatus("Map reset to default and saved.", "text-blue-400");
+        });
+
+        // Initialize Firebase and start the game loop after auth check
+        window.onload = initFirebase;
+
+    </script>
+</body>
+</html>
